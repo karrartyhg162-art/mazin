@@ -131,10 +131,20 @@ def load_config():
     before running the bot.
     """
     if not os.path.exists(CONFIG_FILE):
-        log.error(
-            f"config.json not found at: {CONFIG_FILE}\n"
-            f"Please create the file with your Telegram API credentials."
-        )
+        default_config = {
+            "api_id": 0,
+            "api_hash": "ضع_هنا_API_HASH",
+            "phone_number": "+966xxxxxxxxx"
+        }
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(default_config, f, indent=2, ensure_ascii=False)
+            log.error(
+                f"تم إنشاء ملف الإعدادات في المسار:\n{CONFIG_FILE}\n"
+                f"يرجى فتح الملف ووضع بياناتك داخله ثم إعادة تشغيل البوت."
+            )
+        except IOError as e:
+            log.error(f"Failed to create config.json: {e}")
         return None
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
