@@ -1,0 +1,30 @@
+# Telegram session files
+*.session
+*.session-journal
+
+# Configuration with credentials
+config.json
+
+# Rejection logs (optional - you may want to track this)
+# rejections.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+env/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

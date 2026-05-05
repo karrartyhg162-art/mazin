@@ -1,0 +1,4 @@
+pyrogram>=2.0.0
+# tgcrypto is optional — speeds up encryption but requires C++ build tools
+# Install it if you have Microsoft C++ Build Tools:
+# pip install tgcrypto>=1.2.2
