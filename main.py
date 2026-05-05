@@ -13,6 +13,7 @@ import json
 import time
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 from pyrogram import Client, filters
@@ -477,9 +478,17 @@ async def main():
             # ── Extract channel info from message text ──
             channel_name = "Unknown"
             channel_id = None
-
-            # Try to extract channel name from the message
-            if message.text:
+            
+            # Use regex to extract the exact channel/group name
+            match_ar = re.search(r"تم نقل(?: قناة:| مجموعة:)?\s*(.+?)\s*إليك", text)
+            match_en = re.search(r"(?:Channel|Group)\s*(.+?)\s*has been transferred", text)
+            
+            if match_ar:
+                channel_name = match_ar.group(1).strip()
+            elif match_en:
+                channel_name = match_en.group(1).strip()
+            elif message.text:
+                # Fallback: extract first non-keyword line
                 lines = message.text.split("\n")
                 for line in lines:
                     line_stripped = line.strip()
@@ -487,26 +496,51 @@ async def main():
                         kw in line_stripped.lower()
                         for kw in ["transfer", "نقل", "ملكية", "ownership"]
                     ):
-                        # First non-keyword line might be the channel name
                         channel_name = line_stripped[:100]
                         break
 
-            # ── Log the result ──
+            # ── Log the button result ──
             status = "rejected" if rejection_success else "failed"
 
             if rejection_success:
                 session_stats["rejections"] += 1
                 log.info(
-                    f'[REJECTION] ✅ Channel: "{channel_name}", '
+                    f'[REJECTION] ✅ Button clicked for Channel: "{channel_name}", '
                     f"Reaction: {reaction_time_ms}ms, "
                     f"Status: SUCCESS"
                 )
             else:
                 session_stats["errors"] += 1
                 log.error(
-                    f'[REJECTION] ❌ Channel: "{channel_name}", '
-                    f"Status: FAILED after {max_retries} attempts"
+                    f'[REJECTION] ❌ Button click FAILED for Channel: "{channel_name}", '
+                    f"after {max_retries} attempts"
                 )
+
+            # ── Explicitly Leave/Delete the Channel ──
+            if channel_name != "Unknown":
+                log.info(f"🔎 Scanning dialogs to explicitly LEAVE/DELETE '{channel_name}'...")
+                # Give Telegram a moment to update the dialogs list
+                await asyncio.sleep(2)
+                
+                left_successfully = False
+                async for dialog in client.get_dialogs(limit=30):
+                    chat = dialog.chat
+                    # If we are the creator and the title matches the transferred channel
+                    if chat.is_creator and chat.title and channel_name in chat.title:
+                        log.info(f"🚨 Found transferred chat in dialogs! ID: {chat.id}, Title: {chat.title}")
+                        try:
+                            # Leave and delete the chat entirely
+                            await client.leave_chat(chat.id, delete=True)
+                            log.info(f"💥 SUCCESSFULLY LEFT AND DELETED THE CHAT: {chat.title}")
+                            channel_id = chat.id
+                            left_successfully = True
+                            status = "rejected_and_left"
+                            break
+                        except Exception as e:
+                            log.error(f"❌ Failed to leave chat {chat.id}: {e}")
+                
+                if not left_successfully:
+                    log.warning(f"⚠️ Could not find '{channel_name}' in recent dialogs to leave.")
 
             # ── Save to rejections log ──
             save_rejection({
