@@ -122,7 +122,7 @@ log = setup_logging()
 # Configuration Manager
 # ─────────────────────────────────────────────────────────────────
 
-def load_config() -> dict | None:
+def load_config():
     """
     Load configuration from config.json.
     
