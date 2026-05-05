@@ -381,6 +381,10 @@ async def main():
         We monitor private messages because Telegram's ownership
         transfer notifications arrive as private messages from
         the service account (user ID 777000).
+        
+        CRITICAL: We use message.click() to REJECT the transfer.
+        This is the ONLY correct method. Do NOT use leave_chat().
+        leave_chat() only exits the chat but does NOT reject the transfer.
         """
         detection_start = time.time()
 
@@ -399,85 +403,12 @@ async def main():
             if not is_transfer_message(message):
                 return
 
-            log.info("⚠️  OWNERSHIP TRANSFER DETECTED!")
+            log.info("🚨 OWNERSHIP TRANSFER DETECTED!")
             text = message.text or message.caption or ""
-            log.info(f"Message content: {text[:200]}")
-
-            # ── Find the rejection button ──
-            row_idx, btn_idx = find_rejection_button(message)
-
-            if row_idx is None:
-                log.warning(
-                    "[WARNING] Transfer detected but rejection button NOT FOUND! "
-                    "Message flagged for manual review."
-                )
-                save_rejection({
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "channel_id": None,
-                    "channel_name": "Unknown (button not found)",
-                    "transferred_from": str(sender_id),
-                    "status": "button_not_found",
-                    "bot_reaction_time_ms": round(
-                        (time.time() - detection_start) * 1000
-                    ),
-                    "message_text": text[:500],
-                })
-                return
-
-            # ── Click the rejection button ──
-            rejection_success = False
-            max_retries = 3
-
-            for attempt in range(1, max_retries + 1):
-                try:
-                    log.info(
-                        f"Clicking rejection button (attempt {attempt}/{max_retries})..."
-                    )
-
-                    # Use request_callback_answer to press the inline button
-                    callback_data = (
-                        message.reply_markup.inline_keyboard[row_idx][btn_idx].callback_data
-                    )
-
-                    if callback_data:
-                        await client.request_callback_answer(
-                            chat_id=message.chat.id,
-                            message_id=message.id,
-                            callback_data=callback_data,
-                        )
-                    else:
-                        # If no callback_data, try clicking by button text
-                        # Some buttons use URL or other types
-                        log.warning(
-                            "Button has no callback_data, attempting alternative method..."
-                        )
-                        await message.click(row_idx, btn_idx)
-
-                    rejection_success = True
-                    break
-
-                except FloodWait as e:
-                    wait_time = e.value
-                    log.warning(
-                        f"[RATE LIMIT] FloodWait: waiting {wait_time}s before retry..."
-                    )
-                    await asyncio.sleep(wait_time)
-
-                except RPCError as e:
-                    log.error(
-                        f"[ERROR] RPC Error on attempt {attempt}: {e}"
-                    )
-                    if attempt < max_retries:
-                        backoff = 2 ** attempt
-                        log.info(f"Retrying in {backoff}s...")
-                        await asyncio.sleep(backoff)
-
-            # ── Calculate reaction time ──
-            reaction_time_ms = round((time.time() - detection_start) * 1000)
+            log.info(f"Message content: {text[:300]}")
 
             # ── Extract channel info from message text ──
             channel_name = "Unknown"
-            channel_id = None
             
             # Use regex to extract the exact channel/group name
             match_ar = re.search(r"تم نقل(?: قناة:| مجموعة:)?\s*(.+?)\s*إليك", text)
@@ -487,68 +418,129 @@ async def main():
                 channel_name = match_ar.group(1).strip()
             elif match_en:
                 channel_name = match_en.group(1).strip()
-            elif message.text:
-                # Fallback: extract first non-keyword line
-                lines = message.text.split("\n")
-                for line in lines:
-                    line_stripped = line.strip()
-                    if line_stripped and not any(
-                        kw in line_stripped.lower()
-                        for kw in ["transfer", "نقل", "ملكية", "ownership"]
-                    ):
-                        channel_name = line_stripped[:100]
+            
+            log.info(f"Channel/Group name: {channel_name}")
+
+            # ── Log all available buttons for debugging ──
+            if message.reply_markup:
+                keyboard = getattr(message.reply_markup, "inline_keyboard", None)
+                if keyboard:
+                    for r_idx, row in enumerate(keyboard):
+                        for b_idx, btn in enumerate(row):
+                            log.info(
+                                f"  Button [{r_idx}][{b_idx}]: "
+                                f"text='{btn.text}', "
+                                f"callback_data='{btn.callback_data}'"
+                            )
+                else:
+                    log.warning("Message has reply_markup but NO inline_keyboard!")
+            else:
+                log.warning("Message has NO reply_markup at all!")
+
+            # ════════════════════════════════════════════════
+            # REJECTION STRATEGY: Use message.click() ONLY
+            # This is the CORRECT way to press Telegram's
+            # inline rejection button. Do NOT use
+            # request_callback_answer or leave_chat.
+            # ════════════════════════════════════════════════
+
+            rejection_success = False
+            max_retries = 3
+            clicked_button_text = ""
+
+            # ── Strategy 1: Click rejection button by text match ──
+            row_idx, btn_idx = find_rejection_button(message)
+
+            if row_idx is not None:
+                clicked_button_text = message.reply_markup.inline_keyboard[row_idx][btn_idx].text
+                log.info(f"Found rejection button: '{clicked_button_text}' at [{row_idx}][{btn_idx}]")
+
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        log.info(f"🔴 CLICKING REJECTION BUTTON (attempt {attempt}/{max_retries})...")
+                        
+                        # message.click() is the CORRECT method
+                        # It simulates a real user pressing the inline button
+                        await message.click(row_idx, btn_idx)
+                        
+                        rejection_success = True
+                        log.info(f"✅ REJECTION BUTTON CLICKED SUCCESSFULLY!")
                         break
 
-            # ── Log the button result ──
-            status = "rejected" if rejection_success else "failed"
+                    except FloodWait as e:
+                        wait_time = e.value
+                        log.warning(f"[RATE LIMIT] FloodWait: waiting {wait_time}s...")
+                        await asyncio.sleep(wait_time)
 
+                    except RPCError as e:
+                        log.error(f"[ERROR] RPC Error on attempt {attempt}: {e}")
+                        if attempt < max_retries:
+                            backoff = 2 ** attempt
+                            log.info(f"Retrying in {backoff}s...")
+                            await asyncio.sleep(backoff)
+
+                    except Exception as e:
+                        log.error(f"[ERROR] Unexpected error clicking button: {e}")
+                        if attempt < max_retries:
+                            await asyncio.sleep(1)
+
+            # ── Strategy 2: If no specific rejection button found, try ALL buttons ──
+            if not rejection_success and message.reply_markup:
+                keyboard = getattr(message.reply_markup, "inline_keyboard", [])
+                log.warning("Specific rejection button not found or click failed. Trying ALL buttons...")
+                
+                for r_idx, row in enumerate(keyboard):
+                    if rejection_success:
+                        break
+                    for b_idx, btn in enumerate(row):
+                        # Skip buttons that look like "accept" or "confirm"
+                        btn_text_lower = (btn.text or "").lower()
+                        skip_words = ["قبول", "accept", "confirm", "موافق", "نعم", "yes"]
+                        if any(w in btn_text_lower for w in skip_words):
+                            log.info(f"Skipping accept-like button: '{btn.text}'")
+                            continue
+                        
+                        try:
+                            log.info(f"🔴 Trying button [{r_idx}][{b_idx}]: '{btn.text}'...")
+                            await message.click(r_idx, b_idx)
+                            rejection_success = True
+                            clicked_button_text = btn.text
+                            log.info(f"✅ Button '{btn.text}' clicked successfully!")
+                            break
+                        except Exception as e:
+                            log.error(f"Failed to click button '{btn.text}': {e}")
+
+            # ── Calculate reaction time ──
+            reaction_time_ms = round((time.time() - detection_start) * 1000)
+
+            # ── Log final result ──
             if rejection_success:
                 session_stats["rejections"] += 1
+                status = "rejected"
                 log.info(
-                    f'[REJECTION] ✅ Button clicked for Channel: "{channel_name}", '
-                    f"Reaction: {reaction_time_ms}ms, "
-                    f"Status: SUCCESS"
+                    f'[REJECTION SUCCESS] ✅ '
+                    f'Channel: "{channel_name}", '
+                    f'Button: "{clicked_button_text}", '
+                    f'Reaction: {reaction_time_ms}ms'
                 )
             else:
                 session_stats["errors"] += 1
+                status = "failed"
                 log.error(
-                    f'[REJECTION] ❌ Button click FAILED for Channel: "{channel_name}", '
-                    f"after {max_retries} attempts"
+                    f'[REJECTION FAILED] ❌ '
+                    f'Channel: "{channel_name}", '
+                    f'Could not click any rejection button! '
+                    f'MANUAL ACTION REQUIRED!'
                 )
-
-            # ── Explicitly Leave/Delete the Channel ──
-            if channel_name != "Unknown":
-                log.info(f"🔎 Scanning dialogs to explicitly LEAVE/DELETE '{channel_name}'...")
-                # Give Telegram a moment to update the dialogs list
-                await asyncio.sleep(2)
-                
-                left_successfully = False
-                async for dialog in client.get_dialogs(limit=30):
-                    chat = dialog.chat
-                    # If we are the creator and the title matches the transferred channel
-                    if chat.is_creator and chat.title and channel_name in chat.title:
-                        log.info(f"🚨 Found transferred chat in dialogs! ID: {chat.id}, Title: {chat.title}")
-                        try:
-                            # Leave and delete the chat entirely
-                            await client.leave_chat(chat.id, delete=True)
-                            log.info(f"💥 SUCCESSFULLY LEFT AND DELETED THE CHAT: {chat.title}")
-                            channel_id = chat.id
-                            left_successfully = True
-                            status = "rejected_and_left"
-                            break
-                        except Exception as e:
-                            log.error(f"❌ Failed to leave chat {chat.id}: {e}")
-                
-                if not left_successfully:
-                    log.warning(f"⚠️ Could not find '{channel_name}' in recent dialogs to leave.")
 
             # ── Save to rejections log ──
             save_rejection({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "channel_id": channel_id,
+                "channel_id": None,
                 "channel_name": channel_name,
                 "transferred_from": str(sender_id),
                 "status": status,
+                "button_clicked": clicked_button_text,
                 "bot_reaction_time_ms": reaction_time_ms,
             })
 
